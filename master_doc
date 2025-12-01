@@ -63,26 +63,20 @@ class Hospitalizations():
         self.year_column = 'YEAR' 
         self.rate_column = 'WEEKLY RATE' 
         
-    def hospitalizations (self):
+    def hospitalizations (self, stateName, stateAbr):
         base_directory = Path(__file__).parent
-        filename = f"{self.stateName}/Hospitalizations_{self.stateAbr}.csv"
+        filename = f"{stateName}/ILINet_{stateAbr}.csv"
         filepath = base_directory/filename
-        table = pd.read_csv(filepath, skiprows=2)
-        table[self.rate_column] = pd.to_numeric(
-            table[self.rate_column], errors='coerce'
-        ).fillna(0)
-        annual_summary = (
-            table.groupby(self.year_column)[self.rate_column]
-                 .sum()
-                 .reset_index(name='Total_Flu_Rate')
-        )
-        annual_summary = annual_summary[annual_summary[self.year_column].str.strip() != 'null']
-        annual_summary['Year'] = annual_summary[self.year_column].apply(
-            lambda x: int(x.split('-')[1]) if '-' in x else 0
-        )
-        return annual_summary[annual_summary['Year'] != 0][['Year', 'Total_Flu_Rate']]
+        df = pd.read_csv(filepath, header=1)
+        for col in ['ILITOTAL', 'TOTAL PATIENTS']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(subset=['ILITOTAL', 'TOTAL PATIENTS'], inplace=True)
+        df = df[df['TOTAL PATIENTS'] > 0]
+        df['Annual Flu Rate per 100k'] = (df['ILITOTAL'] / df['TOTAL PATIENTS']) * 100000
+        return df
+
         
-def merge_and_graph_multi_county(tables_dict, data_type):
+def merge_multi_county(tables_dict, data_type):
         first_table = tables_dict.values().__iter__().__next__()
         master_table = pd.DataFrame(first_table[['Year']])
         county_type_lookup = {}
@@ -94,113 +88,121 @@ def merge_and_graph_multi_county(tables_dict, data_type):
             new_col_name = county_col.replace(' ', '_') 
             data_to_merge.rename(columns={county_col: new_col_name}, inplace=True)
             master_table = pd.merge(master_table, data_to_merge, on='Year', how='inner')
-        plt.figure(figsize=(12, 8))
-        if data_type == 'PC':
-            title = "Primary Care Physicians per 100,000 People (All Counties)"
-            ylabel = "PCPs per 100,000 People"
-        elif data_type == 'VAX':
-            title = "Citizens Vaccinated Against Flu per 100,000 People (All Counties)"
-            ylabel = "Vaccinated Citizens per 100,000 People"
-        plt.title(title)
-        plt.ylabel(ylabel)
-        plt.xlabel("Year")
-        color_map = {'Rural': 'b', 'Suburban': 'r', 'Urban': 'k'}
-        for col in master_table.columns:
-            if col != 'Year':
-                county_name_key = col.replace('_', ' ') 
-                county_type = county_type_lookup.get(county_name_key)
-                color = color_map[county_type]
-                plt.plot(master_table['Year'], master_table[col], marker='o', label=county_name_key, color = color)
-        plt.xticks(master_table['Year'], rotation=45, ha='right')
-        plt.legend(title="County", loc='best')
-        plt.grid(axis='y', alpha=0.5)
-        plt.tight_layout()
-        print('Rural counties are in blue, suburban counties are in red, urban counties are in black.')
         return master_table 
-        
-    
 
-coloradoCounties = ['Arapahoe', 'Baca', 'Denver', 'Douglas', 'El_Paso', 'Jackson', 'Larimer', 'Sedgwick', 'Weld']
-georgiaCounties = ['Bartow', 'Clinch', 'Cobb', 'Fulton', 'Gwinnett', 'Randolph', 'Talbot', 'Walton', 'Whitfield']
-illinoisCounties = ['Cook', 'DuPage','Gallatin', 'Hamilton', 'Jasper', 'Lake', 'Madison', 'McHenry', 'Winnebago']
-ohioCounties = ['Butler', 'Cuyahoga', 'Franklin', 'Hamilton', 'Lorain', 'Monroe', 'Morgan', 'Stark', 'Vinton']
-washingtonCounties = ['Asotin', 'Clark', 'Garfield', 'King', 'Kitsap', 'Pend_Oreille', 'Pierce', 'Spokane', 'Yakima']
+def prepping_variable_data (stateName, stateAbr):
+    coloradoCounties = ['Arapahoe', 'Baca', 'Denver', 'Douglas', 'El_Paso', 'Jackson', 'Larimer', 'Sedgwick', 'Weld']
+    georgiaCounties = ['Bartow', 'Clinch', 'Cobb', 'Fulton', 'Gwinnett', 'Randolph', 'Talbot', 'Walton', 'Whitfield']
+    illinoisCounties = ['Cook', 'DuPage','Gallatin', 'Hamilton', 'Jasper', 'Lake', 'Madison', 'McHenry', 'Winnebago']
+    ohioCounties = ['Butler', 'Cuyahoga', 'Franklin', 'Hamilton', 'Lorain', 'Monroe', 'Morgan', 'Stark', 'Vinton']
+    washingtonCounties = ['Asotin', 'Clark', 'Garfield', 'King', 'Kitsap', 'Pend_Oreille', 'Pierce', 'Spokane', 'Yakima']
+    county_map = {
+        'Colorado': coloradoCounties,
+        'Georgia': georgiaCounties,
+        'Illinois': illinoisCounties,
+        'Ohio': ohioCounties,
+        'Washington': washingtonCounties
+    }
+    counties_list = county_map[stateName]
+    for county in counties_list:
+        object_name_vax = f"{county}VAX"
+        scraper_instance_vax = Scraping(county, stateName, stateAbr, 'VAX')
+        tableVax = scraper_instance_vax.scrape()
+        county_vax_scrapers[object_name_vax] = tableVax
+        object_name_pc = f"{county}PC"
+        scraper_instance_pc = Scraping(county, stateName, stateAbr, 'PC')
+        tablePC = scraper_instance_pc.scrape()
+        county_PC_scrapers[object_name_pc] = tablePC
+        
+def linear_regression (stateName, stateAbr, state_hospitalization_df):
+    state_hospitalization_df['YEAR'] = pd.to_numeric(
+        state_hospitalization_df['YEAR'], errors='coerce'
+    ).astype(int)
+    annual_flu_rate = state_hospitalization_df.groupby('YEAR')['Annual Flu Rate per 100k'].mean().reset_index()
+    annual_flu_rate.rename(columns={'YEAR': 'Year'}, inplace=True)
+    merged_vax_table['Year'] = pd.to_numeric(
+        merged_vax_table['Year'], errors='coerce'
+    ).astype(int)
+    merged_pc_table['Year'] = pd.to_numeric(
+        merged_pc_table['Year'], errors='coerce'
+    ).astype(int)
+    coloradoCounties = ['Arapahoe', 'Baca', 'Denver', 'Douglas', 'El_Paso', 'Jackson', 'Larimer', 'Sedgwick', 'Weld']
+    georgiaCounties = ['Bartow', 'Clinch', 'Cobb', 'Fulton', 'Gwinnett', 'Randolph', 'Talbot', 'Walton', 'Whitfield']
+    illinoisCounties = ['Cook', 'DuPage','Gallatin', 'Hamilton', 'Jasper', 'Lake', 'Madison', 'McHenry', 'Winnebago']
+    ohioCounties = ['Butler', 'Cuyahoga', 'Franklin', 'Hamilton', 'Lorain', 'Monroe', 'Morgan', 'Stark', 'Vinton']
+    washingtonCounties = ['Asotin', 'Clark', 'Garfield', 'King', 'Kitsap', 'Pend_Oreille', 'Pierce', 'Spokane', 'Yakima']
+    county_map = {
+        'Colorado': coloradoCounties,
+        'Georgia': georgiaCounties,
+        'Illinois': illinoisCounties,
+        'Ohio': ohioCounties,
+        'Washington': washingtonCounties
+    }
+    counties_list = county_map[stateName]
+    vax_cols = [f'{county}_County' for county in counties_list] 
+    annual_avg_vax_rate_state = merged_vax_table[vax_cols].mean(axis=1)
+    annual_vax_rate = pd.DataFrame({
+        'Year': merged_vax_table['Year'], 
+        'Annual_Avg_VAX_Rate': annual_avg_vax_rate_state
+    })
+    regression_data = pd.merge(annual_flu_rate, annual_vax_rate, on='Year', how='inner')
+    regression_data = regression_data.replace([np.inf, -np.inf], np.nan).dropna()
+    Y = regression_data['Annual Flu Rate per 100k']
+    X = regression_data['Annual_Avg_VAX_Rate']
+    X = sm.add_constant(X)
+    model = sm.OLS(Y, X)
+    vax_results = model.fit()
+    pc_cols = [f'{county}_County' for county in counties_list] 
+    annual_avg_pc_rate_state = merged_pc_table[pc_cols].mean(axis=1) 
+    annual_pc_rate = pd.DataFrame({
+        'Year': merged_pc_table['Year'], 
+        'Annual_Avg_PC_Rate': annual_avg_pc_rate_state
+    })
+    regression_data = pd.merge(annual_flu_rate, annual_pc_rate, on='Year', how='inner')
+    regression_data = regression_data.replace([np.inf, -np.inf], np.nan).dropna()
+    Y = regression_data['Annual Flu Rate per 100k']
+    X = regression_data['Annual_Avg_PC_Rate']
+    X = sm.add_constant(X)
+    model = sm.OLS(Y, X)
+    pc_results = model.fit()
+    print(f"---------------{stateName}------------")
+    vax_percent = round(vax_results.rsquared * 100, 2)
+    pc_percent = round(pc_results.rsquared * 100, 2)
+    print(f'The influence that vaccinations have on state influenza hospital admissions for {stateName} is {vax_percent}%')
+    print(f'The influence that access to primary care physicans have on state influenza hospital admissions for {stateName} is {pc_percent}%')
+
+
 county_vax_scrapers = {}
 county_PC_scrapers = {}
-for county in coloradoCounties:
-    object_name = f"{county}VAX"
-    scraper_instance = Scraping(county, 'Colorado','CO', 'VAX')
-    tableVax = scraper_instance.scrape()
-    county_vax_scrapers[object_name] = tableVax
-    object_name = f"{county}PC"
-    scraper_instance = Scraping(county, 'Colorado', 'CO', 'PC')
-    tablePC = scraper_instance.scrape()
-    county_PC_scrapers[object_name] = tablePC
-for county in georgiaCounties:
-    object_name = f"{county}VAX"
-    scraper_instance = Scraping(county, 'Georgia','GA', 'VAX')
-    tableVax = scraper_instance.scrape()
-    county_vax_scrapers[object_name] = tableVax
-    object_name = f"{county}PC"
-    scraper_instance = Scraping(county, 'Georgia', 'GA', 'PC')
-    tablePC = scraper_instance.scrape()
-    county_PC_scrapers[object_name] = tablePC
-for county in illinoisCounties:
-    object_name = f"{county}VAX"
-    scraper_instance = Scraping(county, 'Illinois','IL', 'VAX')
-    tableVax = scraper_instance.scrape()
-    county_vax_scrapers[object_name] = tableVax
-    object_name = f"{county}PC"
-    scraper_instance = Scraping(county, 'Illinois', 'IL', 'PC')
-    tablePC = scraper_instance.scrape()
-    county_PC_scrapers[object_name] = tablePC
-for county in ohioCounties:
-    object_name = f"{county}VAX"
-    scraper_instance = Scraping(county, 'Ohio','OH', 'VAX')
-    tableVax = scraper_instance.scrape()
-    county_vax_scrapers[object_name] = tableVax
-    object_name = f"{county}PC"
-    scraper_instance = Scraping(county, 'Ohio', 'OH', 'PC')
-    tablePC = scraper_instance.scrape()
-    county_PC_scrapers[object_name] = tablePC
-for county in washingtonCounties:
-    object_name = f"{county}VAX"
-    scraper_instance = Scraping(county, 'Washington','WA', 'VAX')
-    tableVax = scraper_instance.scrape()
-    county_vax_scrapers[object_name] = tableVax
-    object_name = f"{county}PC"
-    scraper_instance = Scraping(county, 'Washington', 'WA', 'PC')
-    tablePC = scraper_instance.scrape()
-    county_PC_scrapers[object_name] = tablePC
-merged_pc_table = merge_and_graph_multi_county(county_PC_scrapers, 'PC')
-merged_vax_table = merge_and_graph_multi_county(county_vax_scrapers, 'VAX')
+
+prepping_variable_data('Colorado', 'CO')
+prepping_variable_data('Georgia', 'GA')
+prepping_variable_data('Illinois', 'IL')
+prepping_variable_data('Ohio', 'OH')
+prepping_variable_data('Washington', 'WA')
+
+merged_pc_table = merge_multi_county(county_PC_scrapers, 'PC')
+merged_vax_table = merge_multi_county(county_vax_scrapers, 'VAX')
+
+
 initialize_hospitalizations_CO = Hospitalizations("Colorado", "CO")
-hospitalizations_CO = initialize_hospitalizations_CO.hospitalizations()
+hospitalizations_CO = initialize_hospitalizations_CO.hospitalizations('Colorado', 'CO')
+
+initialize_hospitalizations_IL = Hospitalizations("Illinois", "IL")
+hospitalizations_IL = initialize_hospitalizations_IL.hospitalizations('Illinois', 'IL')
+
 initialize_hospitalizations_GA = Hospitalizations("Georgia", "GA")
-hospitalizations_GA = initialize_hospitalizations_GA.hospitalizations()
+hospitalizations_GA = initialize_hospitalizations_GA.hospitalizations('Georgia', 'GA')
+
 initialize_hospitalizations_OH = Hospitalizations("Ohio", "OH")
-hospitalizations_OH = initialize_hospitalizations_OH.hospitalizations()
-co_flu_rate = hospitalizations_CO.set_index('Year')['Total_Flu_Rate']
-coloradoCounties_formatted = [f"{c.replace('_', ' ')} County".replace(' ', '_') for c in coloradoCounties]
-pc_co_cols = [col for col in merged_pc_table.columns if col in coloradoCounties_formatted]
-vax_co_cols = [col for col in merged_vax_table.columns if col in coloradoCounties_formatted]
-X_independent_vars = merged_pc_table[['Year'] + pc_co_cols].merge(
-    merged_vax_table[['Year'] + vax_co_cols], on='Year', how='inner'
-).set_index('Year')
-final_co_regression_data = X_independent_vars.merge(
-    co_flu_rate, left_index=True, right_index=True, how='inner'
-)
-if final_co_regression_data.empty:
-    print("FATAL ERROR: The final dataset is empty. Check Year columns for mismatch.")
-    # Check what the indices look like if it fails
-    print("\nX Independent Vars Index (first 5):", X_independent_vars.index.head())
-    print("\nFlu Rate Index (first 5):", co_flu_rate.index.head())
-else:
-    Y = final_co_regression_data['Total_Flu_Rate']
-    X = final_co_regression_data.drop(columns=['Total_Flu_Rate'])
-    X = sm.add_constant(X)
-    
-    model = sm.OLS(Y, X, missing='drop').fit()
-    
-    print("\n--- Colorado Multiple Linear Regression Results (Rate vs. PC/VAX) ---\n")
-    print(model.summary().as_text())
+hospitalizations_OH = initialize_hospitalizations_OH.hospitalizations('Ohio', 'OH')
+
+initialize_hospitalizations_WA = Hospitalizations("Washington", "WA")
+hospitalizations_WA = initialize_hospitalizations_WA.hospitalizations('Washington', 'WA')
+
+
+linear_regression('Colorado', 'CO', hospitalizations_CO)
+linear_regression('Georgia', 'GA', hospitalizations_GA)
+linear_regression('Illinois', 'IL', hospitalizations_IL)
+linear_regression('Ohio', 'OH', hospitalizations_OH)
+linear_regression('Washington', 'WA', hospitalizations_WA)
